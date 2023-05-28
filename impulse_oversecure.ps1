@@ -83,96 +83,129 @@ function Convert-SubnetMaskToCIDR {
     return $cidr
 }
 
-# アドレスとサブネットマスクからドメインを求める
-function Calc-Domain($addr, $mask){
+# アドレスとサブネットマスクからネットワークアドレスを求める
+function Calc-NetworkAddr($addr, $mask){
   return "$(Convert-DecimalToIP ((Convert-IPToDecimal $addr) -band (Convert-IPToDecimal $mask)))/$(Convert-SubnetMaskToCIDR $mask)"
 }
 
-# 挨拶
-echo "[Impulse Oversecure]"
-echo " * VPNクライアントソフトによる接続前であることを確認してください。"
+function Do-Sequence(){
+  # シーケンス冒頭
+  Write-Host " [ スプリットトンネリング接続を開始します。 ]"
+  Write-Host " * VPNクライアントソフトによる接続の前であることを確認してください。"
 
-# 起動前テーブル取得
-$clean_table=get-netroute -addressfamily ipv4
-echo " * 現状ルーティングテーブルを取得しました。"
-$default_ifindex=(get-netroute -DestinationPrefix 0.0.0.0/0)[0].ifindex
-$default_nexthop=(get-netroute -DestinationPrefix 0.0.0.0/0)[0].nexthop
-#echo " * デフォルトゲートウェイ：${default_nexthop}"
-#echo "    * インタフェース：「$((Get-netipinterface -AddressFamily ipv4 -ifindex $default_ifindex).interfacealias)」 (ifindex=${default_ifindex})"
-Write-InterfaceInfo $default_ifindex
+  # 起動前テーブル取得
+  Write-Host " * 現状のルーティングテーブルを取得します。" -NoNewline
+  $clean_table=get-netroute -addressfamily ipv4
+  Write-Host "<OK>"
 
-# VPN起動を待機
-echo " * VPNクライアントソフトによる接続を待機中。"
-#read-host " - 接続が完了したらEnterキーを押してください。"
-$new_dfgw_cnt=(get-netroute -AddressFamily ipv4 -DestinationPrefix 0.0.0.0/0).count
-do{
-  $old_dfgw_cnt=$new_dfgw_cnt
-  $new_dfgw_cnt=(get-netroute -AddressFamily ipv4 -DestinationPrefix 0.0.0.0/0).count
-  #echo "$old_dfgw_cnt $new_dfgw_cnt"
-  Start-Sleep -Seconds 0.5
-}while($old_dfgw_cnt -eq $new_dfgw_cnt)
-Start-Sleep -Seconds 0.5
-
-# VPNインタフェースを特定
-$connected_table=get-netroute -addressfamily ipv4
-$clean_if_list=$clean_table|foreach-object{$_.ifindex}|select-object -unique|sort-object
-$new_if_list=$connected_table|foreach-object{$_.ifindex}|select-object -unique|sort-object
-$diff=compare-object $clean_if_list $new_if_list|where-object{$_.sideindicator -like "=>"}
-
-# インタフェース特定エラー処理
-if($diff.count -eq 0){
-  echo "[error] インタフェースが増えていません。"
-  exit
-}elseif($diff.count -ne 1){
-  echo "[error] インタフェースが2つ以上増えています。"
-  exit
-}
-
-# 確認表示
-$vpn_ifindex=$diff.inputobject
-#echo " * VPNインタフェースを検出しました：「$((Get-netipinterface -AddressFamily ipv4|where-object {$_.ifindex -like $vpn_ifindex}).interfacealias)」 (ifindex=${vpn_ifindex})"
-Write-InterfaceInfo $vpn_ifindex
-read-host " - このインタフェースへのルーティングを無効化してよければ、Enterキーを押してください。"
-
-# VPNインタフェースのレコードを消す
-Get-NetRoute -addressfamily ipv4 -ifindex $vpn_ifindex|
-  where-object{$_.DestinationPrefix.split("/")[1] -ne 32}|  # 単一IPを対象とするものを除外
-  remove-netroute -confirm:$false
-echo " * VPNインタフェースへのルーティングテーブルエントリを削除しました。"
-
-# ルーティングテーブルの復旧
-$null=&{
-  # VPNに消されたエントリの追加
-  @(compare-object $clean_table $connected_table -Property interfaceindex,destinationprefix) |
-    where-object {$_.sideindicator -like "<="} |
-    foreach-object{ `
-      New-NetRoute  -InterfaceIndex $_.interfaceindex `
-                    -DestinationPrefix $_.destinationprefix `
-                    -PolicyStore ActiveStore
-    }
-  # VPNドメインに対する経路設定
-  $vpn_myip=(Get-NetIPConfiguration | where-object interfaceindex -eq $vpn_ifindex).IPv4Address.IPaddress
-  New-NetRoute -DestinationPrefix $(Calc-Domain $vpn_myip $vpn_subnetmask) `
-               -ifindex $vpn_ifindex `
-               -PolicyStore ActiveStore
-  # デフォルトゲートウェイの作成
-  "0.0.0.0","128.0.0.0"|foreach-object{ # 0.0.0.0/0がなぜか機能しないので、上位1bitの2パターンに分けて定義
-    $ip=$_
-    new-NetRoute -DestinationPrefix "$ip/1" `
-                 -ifIndex $default_ifindex `
-                 -nexthop $default_nexthop `
-                 -PolicyStore ActiveStore
-    # なぜか発生する0.0.0.0hopを削除
-    $restored_table=get-netroute -addressfamily ipv4 # 復旧されたテーブルを取得
-    $dust_table=$restored_table|where-object{($_.destinationprefix -eq "$ip/1") -and ($_.ifindex -eq $default_ifindex) -and ($_.nexthop -eq "0.0.0.0")} # 削除リスト作成
-    if($null -ne $dust_table){
-      # 空でなければ削除
-      $dust_table|remove-NetRoute -confirm:$false
-    }
+  # デフォルトゲートウェイ取得
+  Write-Host " * デフォルトゲートウェイを取得します。" -NoNewline
+  $default_route=$($clean_table|where-object destinationprefix -eq "0.0.0.0/0")[0]
+  if($null -eq $default_route){
+    Write-Host "<?>"
+    Write-Host "[error] デフォルトゲートウェイが見つかりません。"
+    return
+  }else{
+    $default_ifindex=$default_route.ifindex
+    $default_nexthop=$default_route.nexthop
+    Write-Host "<OK>"
+    Write-Host " ** 検出されたデフォルトゲートウェイ **" -NoNewline
+    Write-InterfaceInfo $default_ifindex
   }
+
+  # VPN起動を待機
+  Write-Host " * VPNクライアントソフトによる接続を待ち受けています…。" -NoNewline
+  $new_dfgw_cnt=(get-netroute -AddressFamily ipv4 -DestinationPrefix "0.0.0.0/0").count
+  do{
+    $old_dfgw_cnt=$new_dfgw_cnt
+    $new_dfgw_cnt=(get-netroute -AddressFamily ipv4 -DestinationPrefix "0.0.0.0/0").count
+    Start-Sleep -Seconds 0.5
+  }while($old_dfgw_cnt -eq $new_dfgw_cnt)
+
+  # VPNインタフェースを特定
+  Start-Sleep -Seconds 0.5
+  $connected_table=get-netroute -addressfamily ipv4
+  $clean_if_list=$clean_table|foreach-object{$_.ifindex}|select-object -unique|sort-object
+  $new_if_list=$connected_table|foreach-object{$_.ifindex}|select-object -unique|sort-object
+  $diff=compare-object $clean_if_list $new_if_list|where-object{$_.sideindicator -like "=>"}
+
+  # インタフェース特定エラー処理
+  if($diff.count -eq 0){
+    Write-Host "<?>"
+    Write-Host "[error] インタフェースが増えていません。"
+    return
+  }elseif($diff.count -ne 1){
+    Write-Host "<?>"
+    Write-Host "[error] インタフェースが2つ以上増えています。"
+    return
+  }else{
+    Write-Host "<OK>"
+  }
+
+  # 確認表示
+  Write-Host " ** 検出されたVPNネットワークインタフェース **"
+  $vpn_ifindex=$diff.inputobject
+  Write-InterfaceInfo $vpn_ifindex
+  read-host " - このインタフェースへの経路を限定する操作をします。Enterキーを押してください。"
+
+  # VPNインタフェースのレコードを消す
+  Write-Host " * VPNインタフェースへのルーティングテーブルエントリを削除します。" -NoNewline
+  Get-NetRoute -addressfamily ipv4 -ifindex $vpn_ifindex|
+    where-object{$_.DestinationPrefix.split("/")[1] -ne 32}|  # 単一IPを対象とするものを除外
+    remove-netroute -confirm:$false
+  Write-Host "<OK>"
+
+  # ルーティングテーブルの復旧
+  $null=&{
+    # VPNに消されたエントリの追加
+    Write-Host " * VPNによって上書きされた経路を回復します。" -NoNewline
+    @(compare-object $clean_table $connected_table -Property interfaceindex,destinationprefix) |
+      where-object {$_.sideindicator -like "<="} |
+      foreach-object{ `
+        New-NetRoute  -InterfaceIndex $_.interfaceindex `
+                      -DestinationPrefix $_.destinationprefix `
+                      -PolicyStore ActiveStore
+      }
+    Write-Host "<OK>"
+    # VPNネットワークに対する経路設定
+    Write-Host " * 接続先ネットワークに対する経路のみをVPNインタフェースに設定します。"
+    $vpn_myip=(Get-NetIPConfiguration | where-object interfaceindex -eq $vpn_ifindex).IPv4Address.IPaddress
+    $vpn_networkaddr=Calc-NetworkAddr $vpn_myip $vpn_subnetmask
+    Write-Host "   * 接続先ネットワーク：$vpn_networkaddr"
+    New-NetRoute -DestinationPrefix $vpn_networkaddr `
+                 -ifindex $vpn_ifindex `
+                 -PolicyStore ActiveStore
+    Write-Host "   * <OK>"
+    # デフォルトゲートウェイの作成
+    Write-Host " * デフォルトゲートウェイを再設定します。" -NoNewline
+    "0.0.0.0","128.0.0.0"|foreach-object{ # 0.0.0.0/0がなぜか機能しないので、上位1bitの2パターンに分けて定義
+      $ip=$_
+      new-NetRoute -DestinationPrefix "$ip/1" `
+                   -ifIndex $default_ifindex `
+                   -nexthop $default_nexthop `
+                   -PolicyStore ActiveStore
+      # なぜか発生する0.0.0.0hopを削除
+      $restored_table=get-netroute -addressfamily ipv4 # 復旧されたテーブルを取得
+      $dust_table=$restored_table|where-object{($_.destinationprefix -eq "$ip/1") -and ($_.ifindex -eq $default_ifindex) -and ($_.nexthop -eq "0.0.0.0")} # 削除リスト作成
+      if($null -ne $dust_table){
+        # 空でなければ削除
+        $dust_table|remove-NetRoute -confirm:$false
+      }
+    }
+    Write-Host "<OK>"
+  }
+
+  Write-Host " [ スプリットトンネリング設定が完了しました。 ]"
+
+  read-host
 }
 
-echo " * 起動前のルーティングテーブルを復元しました。"
 
+# 挨拶
+Write-Host " [ Impulse Oversecure ]"
+Do-Sequence
+# TODO:メニューダイアログ
+# 終了、ルーティングテーブルの表示、再度接続
+#
 read-host
 
