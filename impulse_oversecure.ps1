@@ -4,7 +4,8 @@ Set-StrictMode -Version 1.0
 if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Administrators")) { Start-Process pwsh.exe "-File `"$PSCommandPath`"" -Verb RunAs; exit }
 
 # configロード
-. ".\config.ps1"
+$scriptpath = $MyInvocation.MyCommand.Path
+. "$(Split-Path -Parent $scriptpath)\config.ps1"
 $vpn_subnetmask=$config_vpn_subnetmask
 
 # 関数定義
