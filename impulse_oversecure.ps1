@@ -5,14 +5,12 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 # インタフェースインデックスを渡すと詳細を表示する
 function Out-InterfaceInfo($if){
   $ifdata=(Get-NetIPConfiguration -ifIndex $if)
-  Write-Host "`
- InterfaceDescription    : $($ifdata.InterfaceDescription)
- InterfaceIndex          : $($ifdata.InterfaceIndex)
- InterfaceAlias          : $($ifdata.InterfaceAlias)
- NetProfile              : $($ifdata.NetProfile.Name)
- IPv4Address             : $($ifdata.IPv4Address.ipaddress)
- IPv4DefaultGateway      : $($ifdata.IPv4DefaultGateway.nexthop)
-  "
+  $ifdata | Select-Object InterfaceDescription,`
+                          InterfaceIndex,`
+                          InterfaceAlias,`
+                          @{n="NetProfile";e={$_.NetProfile.name}},`
+                          @{n="IPv4Address";e={$_.IPv4Address.IPAddress}},`
+                          @{n="IPv4DefaultGateway";e={$_.IPv4DefaultGateway.nexthop}}
 }
 
 # 挨拶
