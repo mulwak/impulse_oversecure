@@ -1,3 +1,5 @@
+Set-StrictMode -Version 1.0
+
 # 管理者権限を強制
 if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Administrators")) { Start-Process pwsh.exe "-File `"$PSCommandPath`"" -Verb RunAs; exit }
 
@@ -141,19 +143,17 @@ echo " * VPNインタフェースへのルーティングテーブルエント�
 # ルーティングテーブルの復旧
 $null=&{
   # VPNに消されたエントリの追加
-  compare-object ($clean_table|select-object -property interfaceindex,destinationprefix)`
-                 ($connected_table|select-object -property interfaceindex,destinationprefix)|
+  @(compare-object $clean_table $connected_table -Property interfaceindex,destinationprefix) |
     where-object {$_.sideindicator -like "<="} |
-    foreach-object{$_.InputObject} |
-    foreach-object{`
-      New-NetRoute  -InterfaceIndex $_.interfaceindex`
-                    -DestinationPrefix $_.destinationprefix`
-                    -PolicyStore ActiveStore`
+    foreach-object{ `
+      New-NetRoute  -InterfaceIndex $_.interfaceindex `
+                    -DestinationPrefix $_.destinationprefix `
+                    -PolicyStore ActiveStore
     }
   # VPNドメインに対する経路設定
   $vpn_myip=(Get-NetIPConfiguration | where-object interfaceindex -eq $vpn_ifindex).IPv4Address.IPaddress
-  New-NetRoute -DestinationPrefix $(Calc-Domain $vpn_myip $vpn_subnetmask)`
-               -ifindex $vpn_ifindex`
+  New-NetRoute -DestinationPrefix $(Calc-Domain $vpn_myip $vpn_subnetmask) `
+               -ifindex $vpn_ifindex `
                -PolicyStore ActiveStore
   # デフォルトゲートウェイの作成
   "0.0.0.0","128.0.0.0"|foreach-object{ # 0.0.0.0/0がなぜか機能しないので、上位1bitの2パターンに分けて定義
@@ -164,7 +164,7 @@ $null=&{
                  -PolicyStore ActiveStore
     # なぜか発生する0.0.0.0hopを削除
     $restored_table=get-netroute -addressfamily ipv4 # 復旧されたテーブルを取得
-    $dust_table=$restored_table|where-object{($_.destinationprefix -eq "$ip/1") -and ($_.ifindex -eq $default_ifindex) -and ($_.nexthop -eq 0.0.0.0)} # 削除リスト作成
+    $dust_table=$restored_table|where-object{($_.destinationprefix -eq "$ip/1") -and ($_.ifindex -eq $default_ifindex) -and ($_.nexthop -eq "0.0.0.0")} # 削除リスト作成
     if($null -ne $dust_table){
       # 空でなければ削除
       $dust_table|remove-NetRoute -confirm:$false
